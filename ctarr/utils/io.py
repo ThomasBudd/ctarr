@@ -20,58 +20,59 @@ def save_pkl(data, path_to_file):
     with open(path_to_file, 'wb') as file:
         pickle.dump(data, file)
 
-def load_nii_file(nii_file):
-    if not os.path.exists(nii_file):
-        raise FileNotFoundError(f'Couldn\'t read {nii_file}, file does not exsist.')
+def _load_nii_file(path_to_nifti):
     
-    img = nib.load(nii_file)
-    spacing = img.header['pixdim'][1:4]
-    im = img.get_fdata()
-    
+    if not os.path.exists(path_to_nifti):
+        raise FileNotFoundError(f'Couldn\'t read {path_to_nifti}, file does not exsist.')
+        
+    nii_img = nib.load(path_to_nifti)
+    sp = nii_img.header['pixdim'][1:4]
+    sp = (sp[2], sp[0], sp[1])
+    im = nii_img.get_fdata()
     assert im.ndim in [3, 4], "Image from nifti file must be 3d"
     
-    # add empty channels axis
     if im.ndim == 3:
         im = im[None]
-    
-    return im, spacing
+        
+    elif im.ndim != 4:
+        raise ValueError(f"Image must be 3d or 4d, but got {im.ndim}d.\n"
+                         f"Check the file {path_to_nifti}")
+    # reorient from typical nifti convention to how we plot the image with
+    # matplotlib
+    im = np.moveaxis(im, 3, 1)
+    im = np.rot90(im, 1, (2,3))[:, ::-1, :, ::-1]
+    return im, sp
 
-def load_scan(path,
-              file_name,
-              image_folder=None,
-              label_folder=None):
+def load_scan(path_to_image_file=None,
+              path_to_label_file=None):
     
     scan = {}
     
-    if image_folder:
-        path_to_image_file = os.path.join(path, image_folder, file_name)
-        im, spacing = load_nii_file(path_to_image_file)
+    if path_to_image_file is not None:
+        im, spacing = _load_nii_file(path_to_image_file)
         
         scan['image'] = im
         scan['spacing'] = spacing
         scan['path_to_image_file'] = path_to_image_file
-        scan['orig_shape'] = im.shape[-3:]
     
-    if label_folder:
+    if path_to_label_file is not None:
+    
+        lb, spacing = _load_nii_file(path_to_label_file)
         
-        path_to_label_file = os.path.join(path, label_folder, file_name)
-        lb, spacing = load_nii_file(path_to_label_file)
-        
-        orig_shape = lb.shape[-3:]
         if 'spacing' in scan:
             if np.max(np.abs(scan['spacing'] - spacing)) > 1e-4:
-                raise ValueError(f'Found non matching spacings for file {file_name}')
-            
-            if orig_shape != scan['orig_shape']:
-                raise ValueError(f'Found non matching shaped for file {file_name}')     
+                raise ValueError('Found non matching spacings for files\n'
+                                 f'{path_to_image_file}\nand\n'
+                                 f'{path_to_label_file}.')
             
         else:
             scan['spacing'] = spacing
-            scan['orig_shape'] = orig_shape
             
         scan['label'] = lb
         scan['path_to_label_file'] = path_to_label_file
-        scan['orig_shape'] = lb.shape[-3:]
+    
+    if path_to_image_file is None and path_to_label_file is None:
+        raise TypeError("No path was given as input for nifti reading.")
     
     return scan
         
@@ -135,21 +136,19 @@ class dataset(object):
 
     def __getitem__(self, index, image_only=False, label_only=False):
         
+        nii_file = self.nii_file_list[index]
+        path_to_image_file = os.path.join(self.path, self.image_folder, nii_file)
+        path_to_label_file = os.path.join(self.path, self.label_folder, nii_file)
+        
         if image_only:            
-            return load_scan(self.path,
-                             self.nii_file_list[index], 
-                             self.image_folder,
+            return load_scan(path_to_image_file,
                              None)
         elif label_only:
-            return load_scan(self.path,
-                             self.nii_file_list[index], 
-                             None,
-                             self.label_folder)
+            return load_scan(None,
+                             path_to_label_file)
         else:
-            return load_scan(self.path,
-                             self.nii_file_list[index], 
-                             self.image_folder,
-                             self.label_folder)
+            return load_scan(path_to_image_file,
+                             path_to_label_file)
         
     def get_median_spacing(self):
         print('computing median spacing...')
@@ -165,8 +164,20 @@ class dataset(object):
         
         return np.median(spacings, 0)
 
-def save_nii(arr, src, tar):
+def save_nii(arr, path_to_src_file, tar):
     
-    orig_nii_img = nib.load(src)
-    new_nii_img = nib.Nifti1Image(arr, orig_nii_img.affine, orig_nii_img.header)
+    # change orientation of the array back to nifti convention
+    if arr.ndim == 3:    
+        arr = np.moveaxis(arr[::-1, :, ::-1], 0, 2)
+        arr = np.rot90(arr, 3, (0,1))
+    elif arr.ndim == 4:
+        arr = np.moveaxis(arr[:, ::-1, :, ::-1], 1, 3)
+        arr = np.rot90(arr, 3, (1,2))
+    else:
+        raise ValueError(f"Array must be 3d or 4d to store as a nifti, but "
+                         f"got {arr.ndim}d.")
+    orig_nii_img = nib.load(path_to_src_file)
+    new_nii_img = nib.Nifti1Image(arr,
+                                  orig_nii_img.affine, 
+                                  orig_nii_img.header)
     nib.save(new_nii_img, tar)

@@ -14,10 +14,16 @@ class CTARR():
     
     def __init__(self,
                  bounding_box_name=None,
-                 enable_orientation_inference=True,
+                 allow_z_flipping=True,
+                 allow_x_flipping=False,
+                 allow_y_flipping=False,
+                 allow_xy_rotation=True,
                  additional_margin=10,
                  path_to_file_storage=None):
-        self.enable_orientation_inference = enable_orientation_inference
+        self.allow_z_flipping = allow_z_flipping
+        self.allow_x_flipping = allow_x_flipping
+        self.allow_y_flipping = allow_y_flipping
+        self.allow_xy_rotation = allow_xy_rotation
         self.path_to_file_storage = path_to_file_storage or os.path.join(__path__[0], 'file_storage') 
         self.additional_margin = additional_margin
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'   
@@ -108,7 +114,7 @@ class CTARR():
         
         # get image and spacing
         im = self._to_4d(scan['image'])
-        im = torch.from_numpy(im).float().to(self.device)
+        im = torch.from_numpy(np.copy(im)).float().to(self.device)
         spacing = np.array(scan['spacing'])
         
         # resize to target spacing
@@ -237,13 +243,15 @@ class CTARR():
         else:
             raise TypeError(f'Expected np.ndarray or torch.tensor, but got {type(arr)}')
         
-    def _flip_arr(self, arr, flp_z):
+    def _flip_arr(self, arr, flp):
         
-        if flp_z:        
+        dim = tuple([i+1  for i, f in enumerate(flp) if f])
+        
+        if len(dim) > 0:        
             if isinstance(arr, np.ndarray):
-                return np.flip(arr, 1)
+                return np.flip(arr, dim)
             elif torch.is_tensor(arr):
-                return torch.flip(arr, (1,))
+                return torch.flip(arr, dim)
             else:
                 raise TypeError(f'Expected np.ndarray or torch.tensor, but got {type(arr)}')
         else:
@@ -329,7 +337,7 @@ class CTARR():
         w = lms_scan[:, 3:] / self.lms_atlas[:, 3:]
         # inference of orientation is only performed if enough segmentations
         # are sufficiently contained
-        infere_orientation = np.sum(w > 0.25) > 3 and self.enable_orientation_inference
+        infere_orientation = np.sum(w > 0.25) > 3
         # normalize to sum one
         w /= w.sum(0, keepdims=True)        
         
@@ -345,32 +353,35 @@ class CTARR():
                 x_var = np.sum(w * (x_rot - x_bar) ** 2, 0)
                 xy_covar = np.sum(w * (x_rot - x_bar) * (y - y_bar), 0)
                 a = xy_covar / x_var
-                a = np.sign(a)
-                a[1] = 1
-                a[2] = 1 #disable flipping only over one axis, the rotation got this
+                a = np.sign(a) if self.allow_z_flipping else 1
+                for i, b in enumerate((self.allow_z_flipping, 
+                                       self.allow_x_flipping, 
+                                       self.allow_y_flipping)):
+                    if not b:
+                        a[i] = 1
                 b = y_bar - a * x_bar
                 
                 # compute also the match between the landmark pairs as weighted MSE
                 x_hat = a * x_rot + b
                 wmse =  np.sum(w * (y - x_hat)**2)
-                
-                transf_list.append((a[0]<0, b))
+                flp = tuple(a < 0)
+                transf_list.append((a<0, b))
                 wmse_list.append(wmse)
             
             k_opt = np.argmin(wmse_list)
-            flp_z, b_init = transf_list[k_opt]
+            flp, b_init = transf_list[k_opt]
         
         else:            
             x_bar, y_bar = np.sum(x * w, 0), np.sum(y * w, 0)              
-            k_opt, flp_z, b_init = 0, False, y_bar - x_bar
+            k_opt, flp, b_init = 0, (False, False, False), y_bar - x_bar
         
         # create input for 
         scale, transl = self._iterativ_matching(self._flip_arr(self._rot_arr(soft_seg,
                                                                              k_opt),
-                                                               flp_z),
+                                                               flp),
                                                 b_init)
         
-        return (k_opt, flp_z, scale, scale * b_init + transl)
+        return (k_opt, flp, scale, scale * b_init + transl)
 
     def _get_transf_from_scan(self, scan):
         
