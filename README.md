@@ -1,9 +1,9 @@
 A deep learning-based tool for fast and robust cropping of anatomical regions on CT images.
-For an in detail description of the algorithms please check [ADD PAPER REFERENCE].
+For an in detail description of the algorithms please check our [paper](https://doi.org/10.59275/j.melba.2024-f5fc).
 
 # Installation
 
-The reccommended way to install the library is to simply clone this repository and install via pip:
+The recommended way to install the library is to simply clone this repository and install via pip:
 
 ```
 git clone https://github.com/ThomasBudd/ctarr
@@ -11,14 +11,20 @@ cd ctarr
 pip install .
 ```
 
-The code can be run on the CPU, but we reccommend using a CUDA compatible GPU.
+The code can be run on the CPU, but we recommend using a CUDA compatible GPU.
 
 # Data management
 
-The library is build to process (3d) CT images and offers some tools to read these from nifti files.
-All images are expected to be 4d arrays. The library assumes that the first dimension indexed the channels (only one for CT images) and that the z-axis is the first axis of the following three spatial dimensions. Arrays with only one channel are allowed to be stored as nifti files with 3 dimensions, the channel axis will be added during loading.
+The library is build to process (3d) CT images and expectes the volumes to be stored in the nifti format. If you're having dicom data we suggest the usage of a the usage of [this](https://github.com/icometrix/dicom2nifti) dicom to nifti converter. Nifti images can be stored as '.nii' or '.nii.gz' file and read by ctarr via the load_scan function:
 
-To process a dataset you have to build a folder structure similar to the one used in the medical decathlon challenges. A parent folder contains two folders 'images' and 'labels' (slightly different naming such as 'imagesTr' will also work as long as the two folders start with 'images' and 'labels') with the corresponding nifitis. The two files of an image segmentation pair in the two folders must have the same name! Here is an example:
+```
+from ctarr.utils.io import load_scan
+scan = load_scan("\PATH\TO\NIFTI\IMAGE.nii.gz")
+```
+
+The 'scan' is simply a dictionary containing some information on the image. It will be used later to save intermediate results used for the cropping and undoing the cropping.
+
+You don't have to follow any particular file or folder structure if you're only using per-computed bounding boxes. However, when computing new bounding boxes you need to store the dataset in a particular structure. To process such a dataset you have to build a folder structure similar to the one used in the medical decathlon challenges. A parent folder contains two folders 'images' and 'labels' (slightly different naming such as 'imagesTr' will also work as long as the two folders start with 'images' and 'labels') with the corresponding nifiti files. The two files of an image segmentation pair in the two folders must have the same name! Here is an example:
 
     PATH_TO_DATASET
       ├── images
@@ -39,7 +45,7 @@ from ctarr.utils.io import dataset
 ds = dataset(PATH_TO_DATASET)
 scan = ds[0]
 ```
-As an alternativ you can create a scan as a dictionary with at least the two keys 'image' and 'spacing'. The value of 'image' must be a numpy array with the 4d image tensor and the value of 'spacing' a numpy array of length 3 with the voxel spacing of the three spatial axes (z first!) in mm.
+As an alternativ you can create a scan as a dictionary with at least the two keys 'image' and 'spacing'. The value of 'image' must be a numpy array with the 4d image tensor (first 1 channel, then z axis) and the value of 'spacing' a numpy array of length 3 with the voxel spacing of the three spatial axes (z first!) in mm.
 
 # Cropping of precomputed anatomical regions
 First we will have to create a cropping object for the desired anatomical region of interest with name NAME:
@@ -49,28 +55,25 @@ from ctarr import CTARR
 ctarr = CTARR(NAME)
 ```
 
-If you enter no name (NAME=None) the object will list the names of all available bounding boxes. Optionally you can increase the bounding boxes by an additional margin (as described in the paper), the default is additional_margin=10 (ie 1cm). Further, if you want to disable the inference of the orientation (z-axis flipping and xy rotations) use enable_orientation_inference=False.
-Next you create a scan as described in the previous section. Call the CTRC instance to crop the image (and the segmentation if available).
+If you enter no name (NAME=None) the object will list the names of all available bounding boxes. Optionally you can increase the bounding boxes by an additional margin (as described in the paper), the default is additional_margin=10 (ie 1cm). CTARR also tries to infere the orientation of the scans as described in the paper. By default, flippings of the z axis and 90 degrees rotations in xy plane are considered. You can enable and disable this and flipping of the x and y axis with the input arguments allow_{z/x/y}_flipping and allow_xy_rotation. To run the cropping pipeline for the images (and segmentations if available) you can simply call the ctarr object:
 
 ```
 ctarr(scan)
 ```
 
-Keep in mind that you might have multiple bounding boxes for you anatomical region of interest, such as when considering both kidneys.
-If you have a particular array you want to crop you can also use the ctarr.crop function with the following arguments (see describtions below):
+This will add a key 'image_crops' to the scan that contains list of the crop(s) of your bounding box(es). Keep in mind that you might have multiple bounding boxes for you anatomical region of interest, such as when considering both kidneys. In case the scan also contained a segmentation under the key 'label' the cropped segmentation will be available via the 'label_crops' key. If you want to crop any other array you can also use the ctarr.crop function directly. Both functions come with some optional arguments as listed below:
 
 ```
-ctarr.crop(arr,                  # array to compute the crop from
-           scan,                 # scan the array belongs to
-           padding_val=None,     # (optional) use to pad the crop in case parts of the bounding box are outside of the image
-           target_spacing=None,  # (optional) use to resize the crop to a desired voxel spacing
-	   z_only=False,   	 # (optional) to only crop in z direction
-           mode='nearest')       # (optional) interpolation mode used in torch.nn.functional.interpolate
+ctarr(scan,                 # as loaded by the ctarr io
+      padding_val=None,     # (optional) use to pad the crop in case parts of the bounding box are outside of the image
+      target_spacing=None,  # (optional) use to resize the crop to a desired voxel spacing
+      z_only=False,   	    # (optional) to only crop in z direction
+      mode='nearest')       # (optional) interpolation mode used in torch.nn.functional.interpolate
 ```
 
 The padding_val argument can be helpful when the anatomical region is not fully contained in the image, ie. when parts of the bounding box is outside of the image. The default behaviour will ignore these parts of the bounding box and return only the part of inside the image. This means that an empty array will be returned when there is no intersection between the bounding box and the image. To pad the crop such that it contains the full bounding box, set the padding_val argument. Options are 'min' to use the minimum value of each channel, or a list of floats to use for each channel.
 
-Deep learning-based processing pipelines of 3d images often resize the images to the same voxel spacing during preprocessing (such as nnUNet). This is integrated in the crop function by the target_spacing argument. If no padding is applied, setting the target_spacing argument will cause the resampling of the voxel size to the desired voxel size. When setting both a padding value and the target_spacing, the method will compute the size of the bounding box in the atlas coordinate system with the target_spacing and reisze all crops to this size. This means that all crops in a dataset will have the same size, which is handy when dealing with 3d ResNet such as for 3d classification problems.
+Deep learning-based processing pipelines of 3d images often resize the images to the same voxel spacing during preprocessing (such as nnUNet). This is integrated in the crop function by the target_spacing argument. If no padding is applied, setting the target_spacing argument will cause the resampling of the voxel size to the desired voxel size. When setting both a padding value and the target_spacing, the method will compute the size of the bounding box in the atlas coordinate system with the target_spacing and resize all crops to this size. This means that all crops in a dataset will have the same size, which is handy when dealing with 3d ResNet such as for 3d classification problems.
 
 On last option the library holds is to only perform the cropping only in z direction and leave the xy plane as is. This can be helpful for example when separating the abdominal part from a whole body scan.
 
